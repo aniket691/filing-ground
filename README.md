@@ -1,22 +1,5 @@
 # FinanceIQ (FinQuery)
 
-**Institutional financial document intelligence** — upload SEC-style filings, ask natural-language questions, and get **grounded answers with page-level citations**.
-
-Each user has an isolated library (companies + documents). Auth is JWT-based; the research UI is a React workspace with dashboard, documents, companies, Q&A, and settings.
-
----
-
-## Live demo
-
-| | |
-|---|---|
-| **App** | [http://206.189.235.250:8080](http://206.189.235.250:8080) |
-| **API docs** | [http://206.189.235.250:8000/docs](http://206.189.235.250:8000/docs) |
-
-> Register an account on the live app (multi-tenant — you only see your own data).  
-> Droplet deploy uses Docker Compose under `/opt/finquery` with a dedicated `deploy` user.
-
----
 
 ## Features
 
