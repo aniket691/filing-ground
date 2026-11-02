@@ -1,0 +1,236 @@
+HSE Platform — Deficiency Register
+Full code review v2 — hse_new_version-main (backend, FrontendNew, mobile)
+Prepared for Junaid Shah — September 2026
+Purpose of this document
+This is a deeper pass on the same repository, done specifically so it can be used as a factual basis for a vendor conversation about outstanding work — not just a list of nice-to-haves. Every item below names an exact file and line range, describes the concrete failure mode (not a hypothetical), and states what "fixed" looks like, so it can be checked off rather than argued about. Where a claim depends on something outside the code itself (a production environment variable, a reverse-proxy config, a deploy setting), that dependency is stated explicitly rather than assumed either way.
+This pass went substantially further than the first: every backend controller was swept for the same class of bug the first findings surfaced (not just the two files already flagged), the three core workflow engines (incident, permit, CAPA) were read start to finish for state-machine correctness, the file-upload and bulk-import paths were traced end to end, dependency versions were checked against published CVEs, and the mobile app's offline-sync design was checked against the backend's write endpoints for duplicate-submission risk. The result is 25 findings, several of them new and, in one case, more severe than anything in the first report.
+Summary
+#
+Severity
+Finding
+Area
+1
+CRITICAL
+Organisation-setup Excel import has no authentication at all
+Backend
+2
+CRITICAL
+Unauthenticated write + cross-tenant access on checklist submissions
+Backend
+3
+CRITICAL
+Real database/admin passwords committed in plaintext
+Backend
+4
+HIGH
+Checklist approval step has no role check
+Backend
+5
+HIGH
+Raw JWT and decoded token payload written to logs
+Backend
+6
+HIGH
+Debug mode / stack traces on by default
+Backend
+7
+HIGH
+SQL-agent tenant-isolation check is countable, not verifiable
+Backend / AI
+8
+HIGH
+Near-zero automated test coverage on workflow logic
+Backend / Frontend / Mobile
+9
+HIGH
+Foreign-key ownership left unvalidated on two assignment fields
+Backend
+10
+HIGH
+Mobile offline queue can double-submit with no idempotency check
+Mobile / Backend
+11
+MEDIUM
+No immediate session revocation on deactivation
+Backend
+12
+MEDIUM
+Mobile tokens stored in plain AsyncStorage
+Mobile
+13
+MEDIUM
+Destructive DB-reset scripts have no safety guard
+Backend
+14
+MEDIUM
+Hand-rolled migrations: duplicate numbers, no real framework
+Backend
+15
+MEDIUM
+Client-supplied header trusted for audit-log attribution
+Backend
+16
+MEDIUM
+No security headers (CSP/HSTS/etc.) in the API layer
+Backend
+17
+MEDIUM
+Evidence files served from a fully public, unauthenticated URL
+Backend
+18
+MEDIUM
+Bulk import disables FK checks and swallows the re-enable failure
+Backend
+19
+MEDIUM
+59+ endpoints accept an unvalidated raw dict body
+Backend
+20
+MEDIUM
+JWT library (python-jose) carries two 2024 CVEs, is unmaintained
+Backend
+21
+LOW
+jwt_issuer / jwt_audience defined but never checked
+Backend
+22
+LOW
+Inconsistent DB name/credentials across maintenance scripts
+Backend
+23
+LOW
+Theta onboarding password-reset endpoints are stubs
+Backend / Frontend
+24
+LOW
+Org-invite email check has no rate limiting (enumeration)
+Backend
+25
+LOW
+Several list endpoints have no upper bound on `limit`
+Backend
+Critical findings
+[CRITICAL] 1. The organisation-setup Excel import endpoint has no authentication at all
+Location: backend/app/controllers/organisation_setup.py — upload_organisation_excel (POST /organisation/setup/upload) and upload_excel_stream (POST /organisation/setup/upload-stream)
+Issue: Neither endpoint has a current_user dependency, an API key, or any other credential check — they take a plain `email: str` parameter that is never verified against a password, OTP, session, or even the pending-invite record the sibling /check endpoint looks up. Whatever Excel file is posted is fed straight into import_excel() / import_excel_stream(), which bulk-inserts up to 17 sheets — organisation, sites, departments, employees, permits, incidents, near-misses, CAPA actions — into the live database with SET FOREIGN_KEY_CHECKS=0 for the duration. After the import, _mark_invite_accepted() links "the most recently created organisation" (db.query(Organisation).order_by(Organisation.id.desc()).first()) to whatever email string was supplied — it does not check that the email actually had a pending invite before running the import, only afterward, and only to decide whether to flip an invite row's status. If no invite matches, the import still ran.
+Why it matters: Anyone who can reach the API — no login, no invite, nothing — can create an arbitrary new tenant's worth of organisation/site/employee/incident/permit/CAPA data in the production database, and can potentially get an existing user account linked to whichever organisation happened to be created most recently (a race between two setup flows, or a deliberate repeat call, could link the wrong admin to the wrong org). This is reachable pre-authentication, so it doesn't require compromising any account first — it requires only knowing the URL, which is visible in the frontend's own bundled JS. Given the platform's core value proposition is trustworthy compliance records, an endpoint that lets anyone inject unbounded records into any table with FK integrity turned off is the most severe issue in this review, more severe than the checklist gap in finding 2 because it needs no session of any kind, valid or spoofed.
+Fix: Require a valid, single-use setup token (the invite_id already returned by /check is a candidate) to be presented and verified server-side before either upload endpoint does anything, and make _mark_invite_accepted look up the invite that specific token belongs to — never "the most recent organisation." Until that's shipped, treat this endpoint as actively exploitable in any environment where it's internet-reachable.
+[CRITICAL] 2. Unauthenticated write access and cross-tenant IDOR on checklist submissions
+Location: backend/app/controllers/checklists.py — create_submission, save_items, submit_submission, and helpers _actor / _sub
+Issue: Three endpoints (create a submission, save its items, submit it) use get_current_user_optional, so they run even with no Authorization header. With no logged-in user, _actor() reads identity/role from the X-User-Email / X-User-Role request headers — defaulting to role "Admin" if the header is absent. Separately, _sub() only joins to the caller's organisation when org_id is actually supplied; with no user, org_id is None and the tenant filter is skipped, so any submission UUID from any tenant can be looked up and edited. FrontendNew's own axios interceptor (src/api/axiosInstance.ts) sends these headers on every request straight from localStorage, so any user can edit localStorage in devtools and have the app itself assert Admin.
+Why it matters: A caller with no valid session — or any authenticated user regardless of real role — can create, edit, and submit HSE checklist records for any organisation, with a self-declared identity the platform's own audit trail (checklist_logs.actor_role) will faithfully record as fact.
+Fix: Require get_current_user (not the optional variant) on all three endpoints, delete the X-User-* header fallback in _actor, and always pass current_user.org_id into _sub.
+[CRITICAL] 3. Real database and admin passwords committed to the repository in plaintext
+Location: backend/create_superadmin.py, backend/migrations/add_full_name.py, backend/migrations/reset_superadmin_password.py
+Issue: create_superadmin.py and add_full_name.py both hardcode the same MySQL root password (Freight@123) in the connection call. reset_superadmin_password.py hardcodes a fixed replacement password (SuperAdmin@123) for the platform's superadmin account — plain Python source, not environment-variable driven the way most scripts under backend/scripts/ already are.
+Why it matters: Anyone with read access to this repository has the literal database root password and a known-good superadmin password. Both must be treated as already compromised the moment the repo left the vendor's hands, regardless of which environment they were originally used against.
+Fix: Rotate the MySQL root password and the superadmin account password now. Rewrite both scripts to read credentials from environment variables, matching backend/scripts/. Treat the old values as permanently burnt even after rotation.
+High-severity findings
+[HIGH] 4. Checklist approval/rejection has no role check
+Location: backend/app/controllers/checklists.py — validate_submission (POST /checklists/submissions/{uuid}/validate)
+Issue: Every checklist template stores a validator_roles list, returned to the frontend by get_submission — but validate_submission only requires a logged-in user via get_current_user; it never checks current_user.role against tmpl['validator_roles']. The template create/edit/deactivate endpoints in the same file correctly call require_role(current_user.role, TEMPLATE_ADMIN_ROLES, ...), so the enforcement pattern exists in this file, it's just missing here.
+Why it matters: Any authenticated user of any role — a Worker, not just a Supervisor or HSE Manager — can approve or reject any organisation's submitted safety checklist, defeating the point of a two-step submit-then-validate workflow.
+Fix: Look up tmpl['validator_roles'] (already fetched via _tmpl) and call the same require_role check used for template management before allowing the status transition.
+[HIGH] 5. Full Authorization header and decoded JWT payload written to application logs
+Location: backend/app/core/dependencies.py — get_current_user()
+Issue: get_current_user unconditionally logs the full "Bearer <token>" Authorization header and the decoded JWT claims on every request — not gated behind a debug flag or redacted.
+Why it matters: Every session token that authenticates against this API is written to the log store in plaintext. Anyone with log access can lift a live bearer token and impersonate that user for the rest of its validity window.
+Fix: Remove the two `DEBUG AUTH` log lines. If auth tracing is needed, log the user id and route only — never the raw token or full claim set.
+[HIGH] 6. The API runs with debug mode and permissive defaults unless every environment variable is set correctly
+Location: backend/app/config/settings.py (debug: bool = True, app_env: str = "local"), backend/app/main.py (FastAPI(..., debug=settings.app_debug))
+Issue: Settings.debug defaults to True and app_env defaults to "local" when the corresponding env vars aren't present, and FastAPI is constructed with debug=settings.app_debug directly.
+Why it matters: If a deployment ever forgets DEBUG=false, the API returns full Python tracebacks — source and local variable values — in the HTTP response body on any unhandled exception. On a system holding incident reports and personal data, that turns a stray 500 into a source-code and data-disclosure incident.
+Fix: Flip the default to debug: bool = False and add a startup check that refuses to boot with debug=True when app_env looks like production.
+[HIGH] 7. The SQL agent's tenant-isolation guardrail counts bind parameters rather than verifying each table is actually filtered
+Location: backend/app/services/sql_agent.py — _check_tenant_isolation()
+Issue: Worth flagging precisely because the surrounding design is genuinely strong (see "What's done well"). The check counts how many times the literal token :org_id appears and compares it to the number of org-scoped tables referenced — it never verifies that each specific table's own join/where condition includes organisation_id = :org_id. A query joining two org-scoped tables could pass by filtering the same table twice while leaving the second table completely unfiltered.
+Why it matters: Because this SQL is written by an LLM from a natural-language question, a subtly malformed or adversarially-prompted query could leak another organisation's incident/near-miss/permit rows through the AI chat feature. The recommended read-only DB user limits the damage to read exposure, but cross-tenant HSE incident data is still sensitive.
+Fix: Replace the count heuristic with a real per-table check — parse the query (a lightweight SQL parser such as sqlglot beats regex here) and confirm each org-scoped table's own condition is ANDed with organisation_id = :org_id.
+[HIGH] 8. Near-zero automated test coverage on the workflow logic the platform actually depends on
+Location: Repository-wide: 311 backend Python files under app/, 2 test files (both about the AI/SQL-agent feature). FrontendNew: 0 test files. mobile: 7.
+Issue: None of the safety-critical business logic — incident intake/investigation, permit issuance/closeout, near-miss/unsafe-act workflows, CAPA lifecycle, multi-tenant scoping itself — has any automated test.
+Why it matters: Every change (including the fixes in this report) is currently verified by manual testing only. A regression in permit closeout logic or CAPA due-date calculation would most likely be caught by a customer, not CI.
+Fix: Prioritize the tenant-isolation logic first, then the incident/permit/CAPA state machines. Even partial coverage catches the next version of finding 2 or 4 automatically.
+[HIGH] 9. Foreign-key ownership is validated in some places and not others — inconsistently, not by design
+Location: backend/app/controllers/incident_workflow.py:859-861 (supervisor_escalate, escalated_to_manager_id) and backend/app/controllers/hazard_register.py:838 (control_owner_id)
+Issue: Both endpoints write a client-supplied employee id directly onto the record with no check that the employee exists, belongs to the caller's organisation, or is active. This is demonstrably not the platform's general standard: the CAPA module validates exactly this in two places (capa_workflow.py:430-436 raising a CAPA, and :632-637 reassigning one — both run "SELECT id FROM employees WHERE id = :id AND organisation_id = :org_id" before accepting the id), and incident_workflow.py itself does the same check at line 720-725 when a supervisor names a CAPA owner during an investigation. The escalation and hazard-control-owner paths are the exceptions, not a different design choice.
+Why it matters: A supervisor escalating an incident, or a controls planner naming who owns a hazard control, can currently write any integer — a nonexistent id, or a real employee belonging to a different organisation — into a field the rest of the app (notifications, the manager queue, audit trail people-lists) treats as a trustworthy foreign key. At best this silently breaks the manager queue / notification lookup for that record; at worst it's a small cross-tenant reference leak.
+Fix: Add the same "SELECT id FROM employees WHERE id = :id AND organisation_id = :org_id" guard used in capa_workflow.py to both call sites before assigning the id.
+[HIGH] 10. The mobile offline queue can create duplicate records with no idempotency protection on the server
+Location: mobile/src/services/offlineQueue.ts — submitOrQueue() / flush(); no counterpart on the backend write endpoints it targets (incident report, permit request, checklist submission, etc.)
+Issue: submitOrQueue distinguishes a real rejection (4xx, rethrown) from an offline failure (queued for later) using isOfflineError, which classifies anything without a response object — including ECONNABORTED / a dropped connection — as "offline." That correctly covers the case where the request never reached the server. It does not, and cannot from the client alone, distinguish that case from the request reaching the server, being processed successfully, and the response being lost on the way back (a connection drop at exactly the wrong moment, which is the normal failure mode on the poor site connectivity this queue's own comments say it exists for). In that case the item is queued and, once connectivity returns, flush() replays it as a brand-new POST. No backend endpoint in incident_workflow.py, permit_workflow.py, or checklists.py recognizes a repeat client-generated request id — there is no idempotency-key column or check anywhere in the write path, even though the team clearly knows the pattern (it's used deliberately in capa_scheduler.py and services/events/handlers.py for a different purpose).
+Why it matters: A worker filing an incident report or a permit request from a site with patchy signal — exactly the scenario this feature is built for — can end up with the same report filed twice: once from the original request the server actually completed, and again from the queued retry. For a compliance record, duplicate incidents/permits are not a cosmetic annoyance; they pollute KPIs, confuse investigation counts, and (for permits) could create two live authorisations for the same job.
+Fix: Generate a client-side request id per enqueued item (offlineQueue.ts already generates one for local tracking — reuse it) and send it as a header or body field the backend checks against a short-lived dedup table/cache before processing a write; return the original response on a repeat rather than creating a second record.
+Medium-severity findings
+[MEDIUM] 11. No immediate way to revoke a user's access
+Location: backend/app/core/dependencies.py — get_current_user()
+Issue: get_current_user never checks user.is_active. A deactivated account's previously issued JWT keeps working until it naturally expires (60 minutes by default).
+Why it matters: A 60-minute window may be an accepted trade-off, but it's worth being deliberate rather than accidental — particularly for contractor accounts where immediate removal sometimes matters.
+Fix: Add an is_active check to get_current_user so deactivation takes effect on the very next request, independent of token expiry.
+[MEDIUM] 12. Mobile app stores access and refresh tokens in plain AsyncStorage
+Location: mobile/src/utils/storage.ts, mobile/src/worker/utils/storage.ts
+Issue: Both the main app and the worker module persist ACCESS_TOKEN/REFRESH_TOKEN via AsyncStorage, which is unencrypted on-device storage.
+Why it matters: On a rooted/jailbroken device or from an unencrypted backup, these tokens — especially the longer-lived refresh token — can be read directly.
+Fix: Move both tokens to react-native-keychain or expo-secure-store, which use the OS keystore/keychain.
+[MEDIUM] 13. Destructive data-reset scripts have no safety guard
+Location: backend/migrations/reset_all_data.py, backend/scripts/reset_data_keep_superadmin.py, backend/scripts/reset_db_except_superadmin.py
+Issue: reset_all_data.py truncates essentially every business table with foreign-key checks disabled, connecting with a hardcoded local root/no-password config, and runs immediately with no confirmation and no environment check.
+Why it matters: For a system of record for safety incidents, a wrong-environment run of any of these is unrecoverable data loss unless backups are airtight.
+Fix: Require an explicit confirmation (an env flag or typed database-name match) before any of these run, and keep them out of anything that could be triggered non-interactively.
+[MEDIUM] 14. Migrations are hand-rolled sequential SQL files with duplicate numbers and ad hoc idempotency
+Location: backend/migrations/ (92 .sql files), run_migrations.py
+Issue: No migration framework — numbered .sql files applied in filename order by a custom runner. Three numbers are reused (040, 042, 077), and idempotency is achieved by catching specific MySQL "already exists" error codes rather than a tracked, transactional ledger.
+Why it matters: Workable today, but fragile as the schema grows: a migration failing halfway through a multi-statement file can leave a partial change the error-code-swallowing logic mistakes for "already applied" next run.
+Fix: Consider Alembic (it can baseline an existing schema). At minimum, renumber the duplicates and add a real applied-migrations ledger checked before each file runs.
+[MEDIUM] 15. Client-supplied header trusted for audit-log attribution on file uploads
+Location: backend/app/controllers/data_management.py — _uploading_user()
+Issue: _uploading_user() reads X-User-Email/X-User-Name straight from request headers (defaulting to "Admin") to stamp uploaded_by, with no verification against the authenticated session.
+Why it matters: Lower severity than finding 2 since it doesn't bypass authentication or expose other tenants' data, but the "who uploaded this" audit field can be freely spoofed.
+Fix: Derive uploaded_by from get_current_user, already used elsewhere in this file.
+[MEDIUM] 16. No security response headers configured at the application layer
+Location: backend/app/core/middleware.py, backend/app/main.py
+Issue: The only custom middleware is request-ID logging. No Strict-Transport-Security, X-Content-Type-Options, Content-Security-Policy, or Referrer-Policy anywhere in the FastAPI app.
+Why it matters: May already be added by a reverse proxy in front of the API — if not, their absence is an easy-to-fix defense-in-depth gap, especially since the API also serves uploaded evidence files.
+Fix: Confirm whether the production reverse proxy sets these; if not, add a small middleware for the standard set.
+[MEDIUM] 17. Uploaded evidence files are served from a fully public, unauthenticated URL
+Location: backend/app/main.py (StaticFiles mount at media_storage.URL_PREFIX), backend/app/services/media_storage.py
+Issue: Incident photos, near-miss evidence, and CAPA supporting documents are saved under backend/uploads/ and served back via a plain StaticFiles mount with no auth dependency of any kind. The filenames are unguessable UUIDs (a genuine strength — see "What's done well"), but the route itself checks nothing: anyone who obtains a URL (from a shared link, a screenshot, a leaked API response, or a referrer header) can view that file indefinitely, from anywhere, with no login and no record of who accessed it.
+Why it matters: This is security-by-obscurity for what can be sensitive material — injury photos, an injured person's identifying evidence, contractor documents. It's a materially different risk profile than "the URL is hard to guess," because URLs leak through channels the app doesn't control.
+Fix: Put evidence retrieval behind an authenticated endpoint that checks the requester's organisation against the record the file belongs to, and either proxy the bytes through that endpoint or issue short-lived signed URLs rather than serving the directory permanently.
+[MEDIUM] 18. Bulk Excel import disables referential-integrity checks and silently swallows failure to re-enable them
+Location: backend/app/controllers/data_management.py (full_import), backend/app/services/excel_import_service.py (import_excel, import_excel_stream) — three separate implementations of the same pattern
+Issue: Each sets SET FOREIGN_KEY_CHECKS=0 for the duration of a multi-sheet import, then in a finally block tries to set it back to 1 — wrapped in a bare except Exception: pass. If that specific statement fails (a dropped connection, a timeout), the exception is discarded and the connection can be returned to the pool still running with referential integrity off. Rows inserted while it was off are never revalidated once checks are back on, since MySQL does not retroactively check existing rows.
+Why it matters: A failed cleanup step here doesn't just affect the import — it can leave a pooled connection silently unsafe for whatever unrelated request picks it up next, and any bad foreign key written during the disabled window (an employee pointing at a department that doesn't exist, say) stays in the database undetected.
+Fix: Don't swallow that specific exception — if the re-enable fails, close/discard that connection rather than returning it to the pool, and log it loudly. Consider a post-import integrity sweep that checks for orphaned foreign keys in the tables just imported.
+[MEDIUM] 19. 59+ backend endpoints accept a raw, unvalidated request body instead of a Pydantic schema
+Location: Repository-wide — e.g. backend/app/controllers/checklists.py, incident_workflow.py, worker.py, team.py, org_users.py, settings.py
+Issue: A repo-wide count finds 59 route parameters typed payload: dict or payload: Any, bypassing FastAPI/Pydantic's automatic request validation. Compare this to the majority of endpoints in permit_workflow.py, capa_workflow.py, and incident_workflow.py's typed payload classes (SupervisorAcknowledge, ManagerCloseIncident, etc.), which do get real validation.
+Why it matters: Malformed input to one of the 59 either gets handled ad hoc by whatever the handler happens to check, or reaches deep into a handler before failing with an unhandled 500 instead of a clean 422 — and, more importantly, an untyped body carries no length/range/required-field guarantees at the boundary, which is exactly the kind of gap that turns into a production incident the first time a client's integration sends something slightly unexpected.
+Fix: Not all 59 need fixing today, but new write endpoints should default to a typed Pydantic model, and the highest-traffic or most safety-relevant of the existing 59 (checklist submissions, worker/team endpoints) should be migrated first.
+[MEDIUM] 20. The JWT library in use (python-jose) carries two 2024 CVEs and is widely reported unmaintained
+Location: backend/requirements.txt — python-jose[cryptography]==3.3.0; used in backend/app/services/auth_service.py
+Issue: python-jose 3.3.0 is affected by CVE-2024-33663 (algorithm-confusion via crafted keys) and CVE-2024-33664 (denial of service via a compressed-token decompression bomb). Multiple projects (including discussion in the FastAPI project itself) have moved off python-jose toward PyJWT or Authlib for this reason. This app signs and verifies with HS256 only and passes an explicit single-algorithm allowlist to jwt.decode, and doesn't use JWE/compression — so the specific published proof-of-concept paths for both CVEs don't appear to apply to how this codebase calls the library today. That's a mitigating factor, not a reason to leave it: the library's maintenance status is the underlying problem, independent of whether today's usage happens to dodge today's known CVEs.
+Why it matters: A future dependency bump, a future code change that widens the accepted algorithms, or a future CVE in a library that has already shown two in one year is where this becomes a live incident with no maintainer to patch it. Riding an abandoned library for the one piece of code that gates every authenticated request is a supply-chain risk worth retiring proactively rather than reactively.
+Fix: Migrate to PyJWT (the FastAPI-recommended alternative) or Authlib's joserfc. Both projects publish direct migration guides from python-jose.
+Low severity / process notes
+21. jwt_issuer / jwt_audience are defined in Settings but never checked
+auth_service.py encodes and decodes tokens without ever setting or validating iss/aud, even though both are configured. Not a vulnerability in a single-issuer system today, but dead configuration that would silently protect nothing if this API ever needs to accept tokens meant for another service.
+22. Inconsistent database name and credentials across one-off scripts
+Some scripts connect to a database named hse, most of the app connects to hse_db, and passwords vary between empty, hardcoded, and env-var-sourced across near-identical scripts. A cleanup pass would reduce the chance of a script running against the wrong database by mistake.
+23. Theta onboarding password-reset flow is backend-stubbed
+FrontendNew has working UI for an OTP-based password reset (auth.service.ts), but the matching backend endpoints in stubs.py just return static {"confirmed": False} / {"reset": False}. Not a vulnerability — an unfinished feature that fails closed — but confirm it isn't promoted in whatever build clients currently use.
+24. /organisation/setup/check has no rate limiting
+The GET endpoint returns whether a given email has a pending org invite, with no throttling — a minor email-enumeration surface. Low value on its own; worth closing in the same pass as finding 1 since it's the same file.
+25. Several list endpoints have no upper bound on `limit`
+e.g. audit_trail.py's `limit: int = 100` with no `le=` constraint, unlike the shared PaginationParams class (which correctly caps at 1000) used elsewhere. Org-scoping limits the blast radius, but it's an easy standardization pass.
+What's done well
+Worth being explicit about, because it's factually true and it changes how the findings above should be read: this is not an inexperienced team writing careless code. The gaps found are real and some are severe, but they read as inconsistencies against the codebase's own demonstrated standard, not an absence of one.
+The AI-to-SQL agent (sql_agent.py) is a genuinely well-layered defense for a hard problem: schema whitelisting, statement-shape parsing, table/column allow/deny lists, forced row limits, a statement timeout, always-rolled-back read-only transactions, and a documented read-only DB user recommendation. Finding 7 is a refinement of a strong design, not a sign of carelessness.
+File upload handling (media_storage.py) is textbook-correct: the extension is derived from a server-side content-type allowlist rather than the attacker-controlled filename, stored filenames are fresh UUIDs, the subdirectory is sanitized against path traversal, and size is capped. The only gap is finding 17 (the serving route, not the upload path).
+The event/outbox pattern (services/events/bus.py) — publish inside the transaction, commit, then dispatch handlers on their own sessions with per-handler failure isolation — is a properly-understood distributed-systems pattern, not an accident.
+The incident workflow's chronology-warning logic detects and surfaces clock-skew between three different timestamp sources (MySQL NOW(), Python utcnow(), Python now()) rather than letting a timeline silently read backwards — an unusually mature piece of defensive engineering, and the in-code comments show it was diagnosed from a real production data anomaly, not theorized in advance.
+Role modelling in workflow_common.py deliberately excludes Auditors from the "can act on a record" role set, with a comment explaining that an auditor who could investigate a record would end up verifying their own work — genuine domain understanding, not generic CRUD.
+The CAPA workflow module is the standard the rest of the app should be held to: every place it accepts a foreign employee id, it checks that id belongs to the caller's organisation first. Findings 2, 9, and 15 are all places some other file didn't do what this one already does correctly.
+How to use this with the vendor
+Frame this as an acceptance gate, not a wish list: findings 1-3 (Critical) are not negotiable before this platform touches a paying client's real data — each is independently sufficient to let an outsider write or read data they should not be able to. Findings 4-10 (High) should be fixed before the next release is called production-ready. The Medium tier is reasonable to schedule across one or two sprints rather than block on immediately, and the Low tier is cleanup that costs little to bundle into whichever fix touches the same file.
+Because every finding here names an exact file, function, and line — and, for the workflow findings, points at the exact place in the same codebase that shows the correct pattern already exists — this is written so the vendor can verify each one in minutes rather than dispute it. If they push back on severity, the concrete question to ask is the one this document already answers for each item: what is the exact request, with no valid credential, that produces the bad outcome described? Findings 1 and 2 already have that answer written out above.

@@ -1,0 +1,18 @@
+vectorstore/
+backend/vectorstore/chroma_db/
+.env
+__pycache__/
+*.pyc
+.DS_Store
+backend/data/raw/*
+!backend/data/raw/.gitkeep
+*.pkl
+frontend/node_modules/
+frontend/dist/
+_stitch_preview/
+.pytest_cache/
+
+# Finance data layer local artifacts
+backend/finance_rag.db
+backend/*.db
+backend/storage_data/

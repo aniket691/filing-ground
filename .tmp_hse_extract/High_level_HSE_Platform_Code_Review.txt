@@ -1,0 +1,159 @@
+HSE Platform — Code Review
+hse_new_version-main — backend, FrontendNew, mobile
+Prepared for Junaid Shah — September 2026
+Scope and approach
+This review covers the repository you shared (backend: FastAPI + MySQL; FrontendNew: React/Vite/TypeScript; mobile: React Native, iOS + Android). Given the size of the codebase (~1,090 tracked files — 321 Python, 442 TypeScript/TSX, 92 hand-written SQL migrations), this was a targeted audit rather than a line-by-line read of every file: authentication and authorization, multi-tenant data isolation, the AI/SQL-agent feature, secrets handling, database migration hygiene, and test coverage — the areas most likely to hide the kind of problem that only surfaces after the platform is handling real incident and compliance data.
+Findings are ordered by severity: Critical (fix before this handles real production data), High (fix soon, clear exploitation path), Medium (real risk, less immediately exploitable or narrower blast radius), and Low/process (hygiene and maintainability). Severity reflects impact on this specific platform — a multi-tenant system of record for incidents, permits-to-work, near-misses, and CAPA actions, where both data confidentiality between tenants and the integrity of the audit trail matter for regulatory reasons.
+Summary
+#
+Severity
+Finding
+Area
+1
+CRITICAL
+Unauthenticated write + cross-tenant access on checklist submissions
+Backend
+2
+CRITICAL
+Real database/admin passwords committed in plaintext
+Backend
+3
+HIGH
+Checklist approval step has no role check
+Backend
+4
+HIGH
+Raw JWT and decoded token payload written to logs
+Backend
+5
+HIGH
+Debug mode / stack traces on by default
+Backend
+6
+HIGH
+SQL-agent tenant-isolation check is countable, not verifiable
+Backend / AI
+7
+HIGH
+Near-zero automated test coverage on workflow logic
+Backend / Frontend / Mobile
+8
+MEDIUM
+No immediate session revocation on deactivation
+Backend
+9
+MEDIUM
+Mobile tokens stored in plain AsyncStorage
+Mobile
+10
+MEDIUM
+Destructive DB-reset scripts have no safety guard
+Backend
+11
+MEDIUM
+Hand-rolled migrations: duplicate numbers, no real framework
+Backend
+12
+MEDIUM
+Client-supplied header trusted for audit-log attribution
+Backend
+13
+MEDIUM
+No security headers (CSP/HSTS/etc.) in the API layer
+Backend
+14
+LOW
+jwt_issuer / jwt_audience defined but never checked
+Backend
+15
+LOW
+Inconsistent DB name/credentials across maintenance scripts
+Backend
+16
+LOW
+Theta onboarding password-reset endpoints are stubs
+Backend / Frontend
+Critical findings
+[CRITICAL] 1. Unauthenticated write access and cross-tenant IDOR on checklist submissions
+Location: backend/app/controllers/checklists.py — create_submission, save_items, submit_submission, and helper _actor / _sub
+Issue: Three endpoints (create a submission, save its items, submit it) use get_current_user_optional, so they run even with no Authorization header at all. When there is no logged-in user, the code falls back to _actor(), which reads the caller's identity and role straight from the X-User-Email / X-User-Role request headers — and if X-User-Role is absent, it defaults to "Admin". Separately, _sub() (which loads a submission by its UUID) only checks that the submission belongs to the caller's organisation when an org_id is actually supplied; with no logged-in user, org_id is None and the join filter is skipped entirely, so any submission UUID from any tenant can be looked up and edited. This is not a theoretical gap: FrontendNew's axios interceptor (src/api/axiosInstance.ts) already sends X-User-Email and X-User-Role on every request, reading them straight out of localStorage — so any user can open devtools, run localStorage.setItem('hse_user', JSON.stringify({email:'x', role:'Admin'})), and the app itself will now assert Admin on these calls.
+Why it matters: A caller with no valid session — or any authenticated user, regardless of real role — can create, edit, and submit HSE checklist records for any organisation on the platform, with a self-declared identity and role, and the platform's own audit trail (checklist_logs.actor_role) will record whatever the client claims. For a compliance product, this means the paper trail that safety audits rely on can be fabricated by an end user without ever logging in.
+Recommendation: Require get_current_user (not the optional variant) on all three endpoints, remove the X-User-* header fallback in _actor entirely, and always pass current_user.org_id into _sub so the tenant join filter can never be skipped. Audit data_management.py's similar _uploading_user() header fallback (finding 12) at the same time.
+[CRITICAL] 2. Real database and admin passwords committed to the repository in plaintext
+Location: backend/create_superadmin.py, backend/migrations/add_full_name.py, backend/migrations/reset_superadmin_password.py
+Issue: create_superadmin.py and add_full_name.py both hardcode the same MySQL root password (Freight@123) directly in the connection call. reset_superadmin_password.py hardcodes a fixed replacement password (SuperAdmin@123) for the platform's superadmin account. These are committed as plain Python source, not read from environment variables the way most of the newer scripts in backend/scripts/ already do (os.getenv("DB_PASSWORD", "")).
+Why it matters: Anyone with read access to this repository — which now includes this review — has the literal database root password and a known-good superadmin password. If this password is still live on any environment (dev, staging, or, worse, production), it must be treated as already compromised the moment the repo was shared, regardless of intent. Even if it's dev-only today, password reuse across environments is common enough that this should be verified, not assumed.
+Recommendation: Rotate the MySQL root password and the superadmin account password now, treating both as burnt. Rewrite the two scripts to read credentials from environment variables like their neighbors in backend/scripts/. Because git history retains old commits even after a file is fixed, either scrub this password from history (git filter-repo / BFG) or, more practically for a private repo, just confirm the rotation makes the old value useless and move on.
+High-severity findings
+[HIGH] 3. Checklist approval/rejection has no role check
+Location: backend/app/controllers/checklists.py — validate_submission (POST /checklists/submissions/{uuid}/validate)
+Issue: Every checklist template stores a validator_roles list (who is allowed to approve/reject that checklist type), and it's returned to the frontend in get_submission. But validate_submission itself only requires a valid, logged-in user via get_current_user — it never checks current_user.role against tmpl['validator_roles']. Compare this to the template create/edit/deactivate endpoints a few hundred lines above, which correctly call require_role(current_user.role, TEMPLATE_ADMIN_ROLES, ...) — so the pattern for enforcing this exists elsewhere in the same file, it's just missing here.
+Why it matters: Any authenticated user of any role — a Worker or Operator, not just a Supervisor or HSE Manager — can approve or reject any organisation's submitted safety checklist. That undermines the entire point of a two-step submit-then-validate workflow for compliance evidence.
+Recommendation: Look up tmpl['validator_roles'] (already fetched via _tmpl) and call the same require_role check used for template management before allowing the status transition.
+[HIGH] 4. Full Authorization header and decoded JWT payload written to application logs
+Location: backend/app/core/dependencies.py — get_current_user()
+Issue: get_current_user logs `logger.info(f"DEBUG AUTH: Authorization Header is: '{auth_header}'")` and `logger.info(f"DEBUG AUTH: Decoded payload: {payload}")` on every request, unconditionally — not gated behind a debug flag or a redaction step. auth_header includes the full "Bearer <token>" value, and payload is the decoded JWT claims (user id, email, role, org id).
+Why it matters: Every valid session token that ever authenticates against this API is written to the log store in plaintext. Anyone with log access (an ops engineer, a misconfigured log-shipping destination, a compromised logging pipeline) can lift a live bearer token and impersonate that user for the remainder of its validity window, with no need to compromise the app itself.
+Recommendation: Remove these two log lines (they read as leftover debugging, not intentional audit logging). If request-level auth tracing is genuinely needed, log the user id and route only, never the raw token or full claim set, and gate it behind settings.debug.
+[HIGH] 5. The API runs with debug mode and permissive defaults unless every environment variable is set correctly
+Location: backend/app/config/settings.py (debug: bool = True, app_env: str = "local"), backend/app/main.py (FastAPI(..., debug=settings.app_debug))
+Issue: Settings.debug defaults to True and Settings.app_env defaults to "local" when the corresponding environment variables aren't present. FastAPI is constructed with debug=settings.app_debug directly, so if a deployment ever forgets to set DEBUG=false (a missing .env line, a container image built without it, a new environment stood up in a hurry), the API silently runs in debug mode.
+Why it matters: FastAPI/Starlette's debug mode returns full Python tracebacks — source snippets and local variable values — in the HTTP response body on an unhandled exception. On a production system handling incident reports, personal data, and safety records, an accidental debug-mode deployment turns any unhandled error into a source-code and data-disclosure incident, not just a 500.
+Recommendation: Flip the default to debug: bool = False (and app_env default to something that fails safe), so a missing environment variable results in the more restrictive behavior, not the more exposed one. Add a startup check that refuses to boot with debug=True when app_env looks like production.
+[HIGH] 6. The SQL agent's tenant-isolation guardrail counts bind parameters rather than verifying each table is actually filtered
+Location: backend/app/services/sql_agent.py — _check_tenant_isolation()
+Issue: This is worth calling out because the surrounding design (see "What's done well") is genuinely strong — which is exactly why this specific gap matters. _check_tenant_isolation counts how many times the literal token :org_id appears in the query and compares that count to the number of org-scoped tables referenced (binds >= len(scoped)). It does not verify that each specific table's own WHERE/JOIN condition actually includes organisation_id = :org_id. A query joining two org-scoped tables could satisfy the count by filtering the same table twice (or by including :org_id in an unrelated HAVING/ORDER clause) while leaving the second joined table completely unfiltered by tenant.
+Why it matters: Because this SQL is written by an LLM from a natural-language question (with the model explicitly told to always add the filter, but models don't always follow instructions, and this is the one path in the codebase where request content partially shapes a query), a subtly malformed or adversarially-prompted query could pass validation while leaking rows from another organisation's incidents, near-misses, or permits through the AI chat feature. The read-only DB user recommended in docs/sql_agent_readonly_user.sql limits the damage to read exposure, not a write, but cross-tenant HSE incident data is still sensitive.
+Recommendation: Replace the count-based heuristic with a real per-table check — parse (or use a lightweight SQL parser like sqlglot instead of regex) to confirm that every org-scoped table's join/where condition is specifically ANDed with organisation_id = :org_id, not just that the token appears somewhere in the statement the required number of times.
+[HIGH] 7. Near-zero automated test coverage on the workflow logic the platform actually depends on
+Location: Repository-wide: backend has 311 Python files under app/ but only 2 test files (test_sql_agent.py, test_sse_tool_parsing.py — both about the AI feature, not core workflows). FrontendNew has 0 test files. mobile has 7.
+Issue: None of the safety-critical business logic — incident intake and investigation, permit-to-work issuance and closeout, near-miss and unsafe-act workflows, CAPA lifecycle, audit scheduling, the multi-tenant scoping itself — has any automated test covering it. The two backend test files that do exist are both about the newer AI/SQL-agent feature.
+Why it matters: For a platform whose output is used for regulatory/compliance record-keeping, this means every change (including the fixes recommended in this report) is currently verified by manual testing only. A regression in, say, permit closeout logic or CAPA due-date calculation would most likely be caught by a customer, not by CI.
+Recommendation: Prioritize test coverage for the tenant-isolation logic first (it's the one thing that must never regress silently), then the incident/permit/CAPA state machines. Even a modest suite around _check_tenant_isolation-style logic and the workflow status transitions would catch the class of bug found in this review before it ships next time.
+Medium-severity findings
+[MEDIUM] 8. No immediate way to revoke a user's access
+Location: backend/app/core/dependencies.py — get_current_user()
+Issue: get_current_user resolves the user row from the DB but never checks user.is_active. A deactivated or offboarded account's previously issued JWT keeps working until it naturally expires (60 minutes by default) — there's no server-side session/refresh-token blacklist visible in the codebase.
+Why it matters: A 60-minute window is a reasonable default and this may already be an accepted trade-off, but it's worth being a deliberate decision rather than an oversight — particularly for contractor or third-party accounts where "remove access immediately" is sometimes a hard requirement (e.g., after a site incident involving that person).
+Recommendation: Add an is_active check to get_current_user so a deactivated account is rejected on its very next request, independent of token expiry. If instant revocation across multiple in-flight tokens is needed, a lightweight token-version or deny-list check is enough — a full session store isn't necessary for this.
+[MEDIUM] 9. Mobile app stores access and refresh tokens in plain AsyncStorage
+Location: mobile/src/utils/storage.ts, mobile/src/worker/utils/storage.ts
+Issue: Both the main app and the worker-app module persist ACCESS_TOKEN and REFRESH_TOKEN via @react-native-async-storage/async-storage, which is unencrypted on-device storage (backed by SharedPreferences/SQLite on Android, a plist-style store on iOS).
+Why it matters: On a rooted/jailbroken device, in an unencrypted device backup, or via another app exploiting a storage misconfiguration, these tokens — especially the longer-lived refresh token — can be read directly. This is a common React Native default, not unique to this app, but it's inconsistent with the amount of care already visible in the app's networking layer.
+Recommendation: Move ACCESS_TOKEN and REFRESH_TOKEN (and STORAGE_KEYS.USER if it carries anything sensitive) to react-native-keychain or expo-secure-store, which use the OS keystore/keychain. AsyncStorage is fine for everything else.
+[MEDIUM] 10. Destructive data-reset scripts have no safety guard
+Location: backend/migrations/reset_all_data.py, backend/scripts/reset_data_keep_superadmin.py, backend/scripts/reset_db_except_superadmin.py
+Issue: reset_all_data.py truncates essentially every business table (incidents, permits, near-misses, CAPA actions, checklists, organisations...) with foreign-key checks disabled, connecting with a hardcoded local root/no-password config. It runs immediately on execution — no confirmation prompt, no check of which database/host it's pointed at, no --dry-run.
+Why it matters: These read like developer convenience scripts for resetting a local dev database, but they ship in the same repo and would run against whatever DB_HOST/credentials happen to be in scope if invoked in the wrong context (e.g., a script copied to a server for "a quick reset" and run against the wrong environment variable set). For a system of record for safety incidents, an accidental run against production is unrecoverable data loss unless backups are airtight.
+Recommendation: Add an explicit guard — refuse to run unless an environment variable like ALLOW_DESTRUCTIVE_RESET=yes is set, or require the operator to type the target database name to confirm, mirroring the confirmation pattern common in Rails/Django destructive-task tooling. Keep them out of anything that could be scheduled or triggered non-interactively.
+[MEDIUM] 11. Migrations are hand-rolled sequential SQL files with duplicate numbers and ad hoc idempotency
+Location: backend/migrations/ (92 .sql files) and run_migrations.py
+Issue: There's no migration framework (Alembic, etc.) — just numbered .sql files applied in filename order by a custom Python runner. Three numbers are reused: 040 (040_create_audits_table.sql and 040_demo_users_org4.sql), 042, and 077 (077_incident_source.sql and 077_permit_evidence.sql) — almost certainly from two people or branches picking the same next number independently. run_migrations.py handles re-runs by catching specific MySQL "already exists" error codes (1050, 1060, 1061, 1826, 1091, 1022) rather than tracking applied migrations transactionally against a ledger table checked before executing each statement.
+Why it matters: This has clearly worked so far (the runner's own docstring shows real lessons learned from three prior breakages), but it's inherently more fragile than a tracked, versioned migration tool as the schema keeps growing: a migration that fails halfway through a multi-statement file can leave a partially-applied change that the error-code-swallowing logic might mistake for "already applied" on the next run.
+Recommendation: Not urgent to rewrite, but consider adopting Alembic (it works fine on top of an existing hand-built schema — you can baseline it) before the migration count grows much further. At minimum, renumber the duplicates and add a real applied-migrations ledger table checked before each file runs, not just per-statement error recovery.
+[MEDIUM] 12. Client-supplied header trusted for audit-log attribution on file uploads
+Location: backend/app/controllers/data_management.py — _uploading_user()
+Issue: _uploading_user() reads X-User-Email or X-User-Name straight from the request headers (defaulting to "Admin") to stamp the uploaded_by field on data-import records, with no verification against the authenticated session.
+Why it matters: Lower severity than finding 1 because it doesn't bypass authentication or expose other tenants' data — but it does mean the "who uploaded this data" audit field can be freely spoofed by anyone who can set a request header, which matters when tracing back a bad data import.
+Recommendation: Derive uploaded_by from get_current_user (already used elsewhere in this file) instead of trusting client headers.
+[MEDIUM] 13. No security response headers configured at the application layer
+Location: backend/app/core/middleware.py, backend/app/main.py
+Issue: The only custom middleware is RequestLoggingMiddleware. There's no Strict-Transport-Security, X-Content-Type-Options, Content-Security-Policy, or Referrer-Policy set anywhere in the FastAPI app.
+Why it matters: These may already be added by a reverse proxy or CDN in front of the API in production, in which case this is a non-issue — but if not, their absence is a standard, easy-to-fix gap in defense-in-depth, especially for a browser-facing app that also serves uploaded evidence files (StaticFiles mount for incident photos).
+Recommendation: Confirm whether the production reverse proxy already sets these. If not, add a small middleware (or use a package like secure) to set the standard set.
+Low severity / process notes
+14. jwt_issuer / jwt_audience are defined in Settings but never checked
+auth_service.py encodes and decodes tokens without ever setting or validating iss/aud, even though both are configured. Not a vulnerability in a single-issuer system today, but dead configuration that would silently fail to protect anything if this API ever needs to accept tokens meant for another service, or vice versa.
+15. Inconsistent database name and credentials across one-off scripts
+Some scripts in backend/migrations/ and backend/create_superadmin.py connect to a database named hse, most of the app connects to hse_db, and passwords vary between empty, hardcoded, and env-var-sourced across scripts that otherwise do near-identical things. Signs of copy-paste drift rather than a security issue on its own, but worth a cleanup pass so a script doesn't get run against the wrong database by mistake.
+16. Theta onboarding password-reset flow is backend-stubbed
+FrontendNew already has working UI (requestThetaPasswordResetOtp, confirmThetaPasswordReset, resetThetaPasswordDirect in auth.service.ts) for an OTP-based password reset, but the corresponding backend endpoints in stubs.py (theta_password_reset_confirm, theta_password_reset_direct) just return static {"confirmed": False} / {"reset": False}. Not a vulnerability — an unfinished feature that fails closed — but worth confirming it isn't reachable/promoted in whatever build the client currently uses, so users don't hit a dead end mid-reset.
+What's done well
+A review like this reads as a punch list of problems by nature, so it's worth being explicit about the parts of this codebase that reflect real, deliberate engineering care — because they do, and they make the gaps above more fixable, not less:
+The AI-to-SQL agent (backend/app/services/sql_agent.py) is a genuinely well-layered defense for a hard problem — letting an LLM query a production database safely. Schema whitelisting, a statement-shape parser, table and column allow/deny lists, forced row limits, a statement timeout, always-rolled-back read-only transactions, and a documented recommendation to run it under a dedicated SELECT-only MySQL user. The one gap found (finding 6) is a refinement of an already-strong design, not a sign of carelessness.
+Role modelling in the permit/hazard workflow layer (backend/app/controllers/workflow_common.py) shows domain understanding, not just generic CRUD — Auditors are deliberately excluded from the "can act on a record" role set, with a comment explaining that an auditor who could investigate a record would end up verifying their own work.
+Passwords are hashed with bcrypt (bcrypt.checkpw) rather than a weak or home-grown scheme.
+Multi-tenant scoping by organisation_id is the deliberate, consistently-documented default across the schema and the large majority of controllers and repositories — the isolation gaps in this report are exceptions to a real overall discipline, not the general pattern.
+The migration runner's own comments and the mobile upload-timeout comment (mobile/src/api/client.ts) both read as lessons captured from real production incidents rather than guesses — a good sign for how the team learns from things going wrong.
+Suggested order of work
+If you want a sequence rather than tackling the summary table top to bottom: fix finding 1 first (it's the only one that's exploitable by a fully unauthenticated caller today), rotate the credentials in finding 2 in parallel since that's a five-minute action, then finding 3 (one missing check, same file as finding 1, cheap to fix while you're already in there). Findings 4 and 5 are both small, mechanical changes to the same two files and worth doing together. Finding 7 (tests) is the one that pays for itself over time — even partial coverage of the tenant-isolation and workflow-status logic will catch the next version of finding 1 or 3 automatically instead of relying on a review like this one.

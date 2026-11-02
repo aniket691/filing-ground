@@ -1,0 +1,36 @@
+GREENFORGE ENERGY CORP.
+FORM 10-K EXCERPT — ITEM 1A RISK FACTORS
+Fiscal year ended September 30, 2024 | Ticker: GFEN
+(Synthetic excerpt for RAG testing)
+
+ITEM 1A — RISK FACTORS
+
+Investing in GreenForge Energy Corp. ("GreenForge" or "the Company") involves material risks. The following factors could adversely affect our business, financial condition, results of operations, and stock price.
+
+COMMODITY PRICE VOLATILITY
+
+Approximately 71% of fiscal 2024 revenue of $1.156 billion was derived from wholesale electricity sales linked to regional day-ahead power prices. A sustained 15% decline in average realized power prices relative to fiscal 2024 levels could reduce annual EBITDA by an estimated $95 million to $120 million, based on management's sensitivity model disclosed in Item 7.
+
+PROJECT CONCENTRATION
+
+Our three largest operating assets — Cedar Ridge Wind (420 MW), Solstice Solar Park (310 MW DC), and Harbor Battery Storage (150 MW / 600 MWh) — generated 58% of fiscal 2024 operating cash flow. An unplanned outage at Cedar Ridge lasting more than 90 days could reduce annual free cash flow by approximately $41 million.
+
+REGULATORY AND PERMITTING RISK
+
+Pending interconnection queue reforms at the Midcontinent Independent System Operator (MISO) may delay commercial operation of our Falcon Prairie wind project (target COD: Q3 2026; expected capex $780 million). If COD slips beyond December 31, 2026, we may forfeit approximately $22 million of production tax credit bridge benefits under current tax-equity term sheets.
+
+COUNTERPARTY CREDIT RISK
+
+As of September 30, 2024, offtake contracts with investment-grade counterparties covered 64% of expected 2025 generation. The remaining merchant exposure is unhedged. A default by our largest offtaker, Prairie Cooperative Utility (11% of contracted MWh), could leave roughly 1.4 TWh of annual generation exposed to spot markets.
+
+LIQUIDITY AND INDEBTEDNESS
+
+Total debt outstanding was $2.04 billion, including $650 million of revolving credit drawn at 6.85% as of year-end. Our leverage covenant requires consolidated net debt / EBITDA not to exceed 4.75x. At September 30, 2024, the ratio was 3.9x. A material EBITDA shortfall could constrain dividend capacity; the Board currently targets a dividend of $0.48 per share annually.
+
+CLIMATE AND PHYSICAL RISK
+
+Severe weather damaged 47 turbines at Cedar Ridge during the April 2024 ice storm, resulting in $31 million of restoration costs (net of insurance recoveries of $18 million). Physical climate risks may increase insurance premiums by an estimated 8% to 12% annually through 2027.
+
+CYBERSECURITY
+
+A ransomware incident in February 2024 temporarily disrupted SCADA telemetry for Solstice Solar Park for 36 hours. No generation assets were physically compromised. Incremental cybersecurity spend in fiscal 2025 is budgeted at $14.5 million.

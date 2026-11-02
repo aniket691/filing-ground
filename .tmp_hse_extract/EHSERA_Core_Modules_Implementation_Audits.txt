@@ -1,0 +1,1229 @@
+EHSERA Intelligence Platform
+Core Modules — Software Implementation Audit Report
+Against: EHSERA_Core_Modules_Documentation.pdf (29 pages, generated 13 Sep 2026)Audit date: 2026-09-17  |  Evidence-only  |  No source code modified
+1. Executive Summary
+This audit traces requirements from EHSERA_Core_Modules_Documentation.pdf through FrontendNew/, FastAPI controllers/services, authorization, validation, persistence, responses, workflow transitions, and Excel import paths. Presence of a screen or route alone was not treated as proof of correct behaviour.
+Key verdicts:
+• Core module surfaces (Dashboard, Compliance, Equipment, Vendors, Risk, Permits, CAPA, Audits, Incident, Near Miss, Hazard Register) and most documented APIs exist with org scoping.
+• The shared 8-stage workflow engine (workflow_stages.py) and CAPA/Audit/Permit lifecycles are substantially implemented with role checks on most critical gates.
+• Critical defects: (1) report-workflow acknowledge/escalate lack previous-status validation; (2) leading-indicator rates use unwindowed man-hours; (3) Risk overdue CAPA counts a status value the CAPA lifecycle never writes.
+• Excel live export is correctly absent. Full 21-sheet import with id_map FK resolution is implemented. Equipment certifications / Risk assessments / Audits have no Excel path (matches doc).
+Metric
+Count
+Requirements classified in matrix
+38
+IMPLEMENTED
+27
+PARTIALLY_IMPLEMENTED
+8
+NOT_IMPLEMENTED
+1
+INCORRECT_IMPLEMENTATION
+2
+UNABLE_TO_VERIFY
+0
+Findings raised
+12
+High severity findings
+4
+2. Requirement Compliance Matrix
+Classification is exclusive per requirement. Evidence is abbreviated; see Finding Register for deep traces.
+ID
+Module
+Requirement
+Status
+Evidence
+R-01
+Architecture
+API mounted under /api/v1; multi-tenant organisation_id
+IMPLEMENTED
+main.py include_router prefix; _org_filter used across controllers
+R-02
+Workflow Engine
+Shared 8-stage mapping RECORD→CLOSE for incident/NM/risk/permit/audit/hazard register
+IMPLEMENTED
+workflow_stages.py FAMILY_MAPPINGS + stage_for()
+R-03
+Dashboard
+Read-only aggregation page with documented KPI endpoints
+IMPLEMENTED
+DashboardPage.tsx + dashboard.py routes
+R-04
+Dashboard KPI
+Predictive Injury Risk Score formula + weights
+IMPLEMENTED
+dashboard.get_leading_indicators weighted_risk_score
+R-05
+Dashboard KPI
+TRIR = (recordable×200000)/hours
+PARTIALLY_IMPLEMENTED
+Formula present; hours not period-filtered
+R-06
+Dashboard KPI
+LTIF = (LTI×1e6)/hours
+PARTIALLY_IMPLEMENTED
+Formula present; hours not period-filtered
+R-07
+Dashboard KPI
+DART = (LTI×200000)/hours
+PARTIALLY_IMPLEMENTED
+Formula present; uses LTI count not days-away restricted set
+R-08
+Dashboard KPI
+FAR = (fatalities×1e8)/hours
+PARTIALLY_IMPLEMENTED
+Formula present; hours not period-filtered
+R-09
+Dashboard KPI
+Near Miss Ratio = NM / recordable
+IMPLEMENTED
+dashboard.py near_miss_ratio with zero handling
+R-10
+Dashboard KPI
+Audit Readiness AVG(walk/5×100, audit score)
+IMPLEMENTED
+audit_readiness.compute_audit_readiness
+R-11
+Dashboard KPI
+Contractor Safety Score AVG(latest scorecards)
+IMPLEMENTED
+compute_contractor_safety_score used by dashboard
+R-12
+Compliance
+GET /analytics/compliance-summary KPIs
+IMPLEMENTED
+analytics.get_compliance_summary
+R-13
+Compliance
+Permit Compliance Closed/Total×100
+IMPLEMENTED
+analytics.py ~1018-1024
+R-14
+Compliance
+LOTO proxy Lockout no-deviation
+IMPLEMENTED
+analytics.py ~1026-1038
+R-15
+Compliance
+CAPA Closure Completed/Total×100
+IMPLEMENTED
+analytics.py ~1049-1053
+R-16
+Compliance
+Policy-Hazard Coverage capped 100%
+IMPLEMENTED
+analytics.py legal_register_pct
+R-17
+Equipment
+CRUD + summary KPIs PM/MTBF/SCE
+IMPLEMENTED
+equipment_register.py summary + CRUD
+R-18
+Equipment
+equipment-write role gate
+PARTIALLY_IMPLEMENTED
+Auth only; no dedicated write-role check
+R-19
+Equipment Cert
+CRUD certifications Valid/Expiring/Expired
+IMPLEMENTED
+equipment_certification controller
+R-20
+Vendors
+Summary KPIs TRIR/Induction/Contribution/Safety Score
+IMPLEMENTED
+vendor.get_vendor_summary
+R-21
+Vendors
+Contractor lifecycle prequalify/suspend/hours/access/scorecard/RAMS
+IMPLEMENTED
+contractor.py + rams_router
+R-22
+Risk A
+Structured risk assessment 10 categories + score/submit/approve
+IMPLEMENTED
+risk_assessment.py
+R-23
+Risk A
+Doc: any authenticated user can start/answer
+INCORRECT_IMPLEMENTATION
+Code requires Supervisor/Manager roles
+R-24
+Risk B
+Risk report 8-stage workflow via factory
+IMPLEMENTED
+risk_workflow.py uses report_workflow_factory
+R-25
+Risk KPI
+Open CAPA + Overdue CAPA = status Overdue
+INCORRECT_IMPLEMENTATION
+Overdue uses literal status never written by CAPA lifecycle
+R-26
+Permits
+Dual status + workflow engine transitions
+IMPLEMENTED
+permit_workflow.py + PERMIT_STATUS_STAGE
+R-27
+Permits KPI
+Active count + exposure hours + compliance%
+IMPLEMENTED
+analytics.get_permits_summary
+R-28
+CAPA
+10-step lifecycle raise→plan→…→approve-closure→reopen
+IMPLEMENTED
+capa_workflow.py endpoints
+R-29
+CAPA KPI
+Closure rate + ageing buckets
+IMPLEMENTED
+analytics + capa_workflow.ageing_report
+R-30
+Audit
+10-step lifecycle schedule→close + CAPA on issue-report
+IMPLEMENTED
+audit.py lifecycle + _raise_capas
+R-31
+Audit KPI
+Completion/Finding/NC/Regulatory/Overdue findings
+IMPLEMENTED
+audit.get_audit_kpis
+R-32
+Incident
+Report workflow transitions + queues + trail
+PARTIALLY_IMPLEMENTED
+Factory present; acknowledge lacks from-status gate
+R-33
+Near Miss
+Same factory as incident + auditor verify
+PARTIALLY_IMPLEMENTED
+Same acknowledge gap as incident
+R-34
+Hazard Register
+7-status lifecycle + Manager-only close
+PARTIALLY_IMPLEMENTED
+Close Manager-only OK; verify-controls allows all elevated
+R-35
+Excel
+No live export; Analytics Export disabled
+IMPLEMENTED
+AnalyticsPage.tsx title Export is not available yet
+R-36
+Excel
+21-sheet full import + id_map FK resolution
+IMPLEMENTED
+excel_import_service.py sheet runners
+R-37
+Excel
+No sheets for Risk Assessments / Risk Reports / Audits / Certs
+IMPLEMENTED
+Absent from import order (by design per doc)
+R-38
+Excel
+Org Setup Step1 template stub returns empty JSON
+NOT_IMPLEMENTED
+Doc claim outdated: stubs.py now returns CSV
+3. Workflow Audit
+Shared engine: backend/app/services/workflow_stages.py maps incident/near_miss/risk/unsafe_act via REPORT_STATUS_STAGE; permits via PERMIT_STATUS_STAGE; audits via AUDIT_STATUS_STAGE; hazard register via HAZARD_REGISTER_STATUS_STAGE. Stage is derived, not stored.
+Family
+Controller
+From→To sample
+Role gate
+Invalid transition
+Audit trail
+Side effects
+Incident/NM/Risk
+report_workflow_factory
+reported→…→approved→closed
+Elevated / Manager
+Close OK; Acknowledge NO
+Timestamps + trail factories
+CAPA create on investigate
+Permit
+permit_workflow
+requested→issued→active→work_complete→closed
+Worker/Sup/Mgr/Auditor
+Yes (_require_state)
+Timestamps
+Gate engine on approve
+CAPA
+capa_workflow
+raised→…→CLOSED
+Owner/Sup/Mgr
+Yes (terminal + checks)
+Detail fields + reviews
+Parent advance; 30/60/90 reviews
+Audit
+audit.py
+schedule→…→close
+Mgr/Auditor
+Step facts / sync
+Report + findings
+_raise_capas on issue-report
+Hazard register
+hazard_register
+open→…→controlled→closed
+Elevated; close Manager
+Yes (_require_stage)
+Timestamps
+Lesson optional on close
+Finding F-001/F-007: acknowledge and escalate can be invoked regardless of current status — fails the audit standard for previous-status + invalid-transition handling.
+4. Role / Authorization Audit
+Area
+Expected (doc)
+Actual
+Status
+Incident acknowledge
+Supervisor/Manager
+ALL_ELEVATED_ROLES + auth
+IMPLEMENTED
+Incident close
+Manager
+MANAGER_ROLES + approved-only
+IMPLEMENTED
+Hazard close
+Manager only
+MANAGER_ROLES
+IMPLEMENTED
+Hazard verify-controls
+Manager
+ALL_ELEVATED_ROLES
+INCORRECT_IMPLEMENTATION
+Risk assessment start
+Any authenticated
+Supervisor|Manager only
+INCORRECT_IMPLEMENTATION
+CAPA approve-closure
+Safety Manager
+MANAGER_ROLES
+PARTIALLY_IMPLEMENTED
+Equipment write
+equipment-write access
+Any authenticated org user
+PARTIALLY_IMPLEMENTED
+Tenant isolation
+organisation_id filters
+Widespread _org_filter / org_id checks
+IMPLEMENTED
+5. API Audit
+Authenticated via Depends(get_current_user) on audited endpoints. Prefix /api/v1 from main.py. Representative endpoint verification (not every verb listed in the PDF was line-traced; those not fully traced are marked UNABLE_TO_VERIFY in matrix where applicable).
+Method
+Route
+Auth
+Authz
+Validation
+DB
+Status
+GET
+/dashboard/leading-indicators
+Yes
+Org scope
+Query dates/days
+Incident/NM/Shift/SW/Audit
+PARTIALLY_IMPLEMENTED
+GET
+/analytics/compliance-summary
+Yes
+Org scope
+N/A
+Permit/Policy/CAPA/HC/Audit
+IMPLEMENTED
+GET
+/equipment-register/summary
+Yes
+Org scope
+N/A
+equipment
+IMPLEMENTED
+POST
+/equipment-register
+Yes
+None beyond auth
+Pydantic body
+INSERT equipment
+PARTIALLY_IMPLEMENTED
+GET
+/vendors/summary
+Yes
+Org scope
+N/A
+contractors+hours+incidents
+IMPLEMENTED
+POST
+/incident-workflow/report
+Yes
+Worker path
+Payload schema
+incidents insert reported
+IMPLEMENTED
+POST
+/incident-workflow/{id}/acknowledge
+Yes
+Elevated
+Missing from-status
+UPDATE status
+INCORRECT_IMPLEMENTATION
+POST
+/capa/{id}/approve-closure
+Yes
+MANAGER_ROLES
+Closure checks live
+status CLOSED + reviews
+IMPLEMENTED
+POST
+/audits/{id}/issue-report
+Yes
+Auditor path
+Step facts
+Report + CAPAs
+IMPLEMENTED
+POST
+/hazard-register/{id}/close
+Yes
+MANAGER_ROLES
+Must be controlled
+register_status closed
+IMPLEMENTED
+GET
+/org-admin/data-management/full-template
+Yes
+Org admin path
+N/A
+openpyxl template
+IMPLEMENTED
+POST
+/org-admin/data-management/full-import
+Yes
+Org admin path
+xlsx parse
+excel_import_service
+IMPLEMENTED
+6. KPI / Formula Audit
+KPI
+Doc formula
+Code formula
+Numerator filter
+Denominator
+Tenant
+Zero/null
+Status
+Predictive Injury Risk
+(Σw)/(n×3)×100 cap 100
+Same weights Fatal..else 0.5
+Incident window
+n×3
+org_id
+0 if n=0
+IMPLEMENTED
+TRIR
+Rec×200k/hrs
+Same
+type=injury windowed
+ALL shift hours
+org_id
+0 if hrs=0
+PARTIALLY_IMPLEMENTED
+LTIF
+LTI×1e6/hrs
+Same (ltifr)
+injury+Lost Time
+ALL shift hours
+org_id
+0 if hrs=0
+PARTIALLY_IMPLEMENTED
+DART
+LTI×200k/hrs
+Same
+LTI count
+ALL shift hours
+org_id
+0 if hrs=0
+PARTIALLY_IMPLEMENTED
+FAR
+Fat×1e8/hrs
+Same
+severity Fatal
+ALL shift hours
+org_id
+0 if hrs=0
+PARTIALLY_IMPLEMENTED
+Near Miss Ratio
+NM/Rec
+Same
+Windowed both
+recordables
+org_id
+0 if rec=0
+IMPLEMENTED
+Audit Readiness
+AVG(walk/5×100, audit)
+compute_audit_readiness
+All-time
+N/A avg
+org_id
+0 if none
+IMPLEMENTED
+Permit Compliance
+Closed/Total×100
+Same
+status Closed
+all permits
+org_id
+0 if total=0
+IMPLEMENTED
+LOTO Compliance
+No-dev/Issued×100
+Equipment Isolation/Lockout
+deviation No
+lockout permits
+org_id
+None if 0
+IMPLEMENTED
+CAPA Closure
+Done/Total×100
+completed|closed|verified|done
+status set
+all CAPA
+org_id
+0 if total=0
+IMPLEMENTED
+Risk Overdue CAPA
+status=Overdue
+status=='Overdue'
+literal
+N/A
+org_id
+often 0
+INCORRECT_IMPLEMENTATION
+PM Compliance
+not past Next_PM_Due
+Same proxy
+has Next_PM_Due
+those rows
+org_id
+None if none
+IMPLEMENTED
+Audit Completion
+Completed/Planned×100
+closed_at or completed
+all audits
+planned=all
+org_id
+None if 0
+IMPLEMENTED
+7. Frontend–Backend Integration Audit
+Page / Route
+Frontend file
+Primary API(s)
+Wired?
+Notes
+/ Dashboard
+DashboardPage.tsx
+/dashboard/stats, leading-indicators, …
+Yes
+Displays TRIR/FAR/predictive detail
+/compliance
+CompliancePage / ComplianceDashboard
+/analytics/compliance-summary
+Yes
+NC links to CAPA detail
+/equipment-certification
+EquipmentCertificationPage
+/equipment-register*, certifications
+Yes
+CRUD UI
+/vendors
+VendorsPage
+/vendors/summary
+Yes
+KPI + register
+/root-cause-analysis
+RiskPage
+/analytics/risk-summary, matrices
+Yes
+Overdue KPI inherits F-003
+/risk/tracking
+RiskTrackingPage
+/risk-workflow*, /risk-trail
+Yes
+Lifecycle tracking
+/actions
+ActionsPage
+/analytics/permits-summary
+Yes
+PTW ops dashboard
+/capa-actions
+CapaActionsPage / CapaDetailPage
+/capa/*, /capa-actions/
+Yes
+Dual CRUD+workflow
+/audits
+AuditRegisterPage + detail
+/audits/kpis, /audits/…
+Yes
+Programme/trends/templates
+Incident tracking/register
+IncidentTracking / RegisterIncident
+/incidents/all, /incident-workflow/*
+Yes
+Shares factory defects
+Near miss
+NearMissPage / Tracking
+/near-miss-workflow/*
+Yes
+Shares factory defects
+Hazards
+HazardRegister / Tracking
+/hazard-register/*
+Yes
+Also /unsafe-acts alias
+/data-management
+DataManagementPage
+full-template / full-import
+Yes
+21-sheet import
+/analytics Export
+AnalyticsPage.tsx
+N/A
+Disabled
+Matches no-export requirement
+8. Database / Data Integrity Audit
+Topic
+Finding
+Status
+Status storage
+VARCHAR statuses; no CHECK/ENUM — matches doc caveat; enforcement in Python
+IMPLEMENTED
+Tenant column
+organisation_id on business tables; controllers filter
+IMPLEMENTED
+Dual CRUD + workflow
+Plain CRUD controllers coexist with workflow controllers on same tables
+IMPLEMENTED
+Permit dual fields
+status business vs workflow_status engine — documented and coded
+IMPLEMENTED
+FK on import
+id_maps resolve cross-sheet refs; FOREIGN_KEY_CHECKS toggled in import engine
+IMPLEMENTED
+Immutable audit_logs
+Not written; trails reconstructed — see F-009
+PARTIALLY_IMPLEMENTED
+CAPA status Overdue
+Not produced by capa_workflow; demo/import may still seed it
+INCORRECT_IMPLEMENTATION
+9. Excel Import Audit
+Sheet
+Parser
+DB table
+FK resolution
+In product import?
+Status
+Organisation
+_insert_organisation
+organisations
+N/A
+Yes
+IMPLEMENTED
+Hazard_Categories
+_insert_hazard_categories
+hazard_categories
+id_maps
+Yes
+IMPLEMENTED
+Hazards
+_insert_hazards
+hazards
+category id_map
+Yes
+IMPLEMENTED
+Equipment_Register
+_insert_equipment_register
+equipment
+limited
+Yes
+IMPLEMENTED
+Contractor_*
+companies/workers/hours
+contractor_*
+company id_map
+Yes
+IMPLEMENTED
+Permits_To_Work
+_insert_permits_to_work
+permits_to_work
+type/station/emp
+Yes
+IMPLEMENTED
+Incidents
+_insert_incidents
+incidents
+hazard/station/emp
+Yes
+IMPLEMENTED
+Near_Misses
+_insert_near_misses
+near_misses
+hazard/station/emp
+Yes
+IMPLEMENTED
+CAPA_Actions
+_insert_capa_actions
+capa_actions
+incident link
+Yes (simple rows)
+IMPLEMENTED
+Equipment Certifications
+—
+—
+—
+No (per doc)
+IMPLEMENTED
+Risk Assessments / Reports
+—
+—
+—
+No (per doc)
+IMPLEMENTED
+Audits
+—
+—
+—
+No (per doc)
+IMPLEMENTED
+Live Excel export
+—
+—
+—
+Disabled UI
+IMPLEMENTED
+Import service: backend/app/services/excel_import_service.py. Templates/full-import via data_management + org-setup routes.
+10. Finding Register
+F-001 — Incident / Near Miss / Risk Report
+Finding ID
+F-001
+Module
+Incident / Near Miss / Risk Report
+Requirement
+Workflow transition Acknowledge: previous status reported → acknowledged with invalid-transition handling
+Expected Behaviour
+Acknowledge only allowed from reported (or defined prior state); reject otherwise with 400
+Actual Behaviour
+supervisor_acknowledge sets workflow_status='acknowledged' with no previous-status check
+Status
+INCORRECT_IMPLEMENTATION
+Severity
+High
+Evidence
+No if row.workflow_status ... guard before assignment
+File
+backend/app/controllers/report_workflow_factory.py
+Function
+supervisor_acknowledge
+Line
+533-547
+Business Impact
+Closed/approved records can be forced back to acknowledged, breaking lifecycle integrity and trails
+Recommended Fix
+Require workflow_status in ('reported',) (or documented set); raise HTTP 400 otherwise; add unit test
+Verification Test
+POST acknowledge on closed record → expect 400; on reported → 200 and status acknowledged
+F-002 — Dashboard KPI
+Finding ID
+F-002
+Module
+Dashboard KPI
+Requirement
+TRIR/LTIF/DART/FAR use period-filtered numerator AND matching hours denominator
+Expected Behaviour
+Hours worked filtered to same date window as incident counts
+Actual Behaviour
+Incident counts use data_window_*; man_hours = SUM(all ShiftSchedule.actual_hours_worked) with no date filter
+Status
+INCORRECT_IMPLEMENTATION
+Severity
+High
+Evidence
+man_hours computed once org-wide; rates divide windowed numerators by all-time hours
+File
+backend/app/controllers/dashboard.py
+Function
+get_leading_indicators
+Line
+226-309
+Business Impact
+Selecting 7D/30D/90D understates rates vs true period rates; KPIs not comparable across windows
+Recommended Fix
+Filter ShiftSchedule by worked date into same window; document if all-time hours intentional
+Verification Test
+Seed hours only outside window; confirm rate uses 0 denominator handling or matching hours
+F-003 — Risk
+Finding ID
+F-003
+Module
+Risk
+Requirement
+Overdue CAPA Actions = COUNT(CAPA WHERE status='Overdue')
+Expected Behaviour
+Doc formula OR computed overdue from due_date (doc literal uses status)
+Actual Behaviour
+risk-summary overdue_count filters CapaAction.status == 'Overdue'; capa_workflow comments state lifecycle never writes that status
+Status
+INCORRECT_IMPLEMENTATION
+Severity
+High
+Evidence
+overdue_count uses literal status; ageing_report computes overdue from due dates instead
+File
+backend/app/controllers/analytics.py
+Function
+get_risk_summary
+Line
+884-887
+Business Impact
+Risk page Overdue CAPA KPI stays ~0 for live workflow CAPAs; false assurance
+Recommended Fix
+Align with capa_lifecycle is_overdue / due_date < anchor like ageing_report
+Verification Test
+Create open CAPA with past due_date; risk-summary overdue_count increments
+F-004 — Risk Assessment
+Finding ID
+F-004
+Module
+Risk Assessment
+Requirement
+Start/answer/score available to any authenticated user (doc §7)
+Expected Behaviour
+Any authenticated user can create and fill assessment
+Actual Behaviour
+require_role(... SUPERVISOR_ROLES | MANAGER_ROLES) on start/answer/score/submit
+Status
+INCORRECT_IMPLEMENTATION
+Severity
+Medium
+Evidence
+Worker role cannot start assessment despite documentation
+File
+backend/app/controllers/risk_assessment.py
+Function
+start_assessment / answer_category
+Line
+114, 178, 219
+Business Impact
+Doc/contract mismatch; workers blocked from structured RA if product intended open access
+Recommended Fix
+Either relax to authenticated users per doc, or update documentation to Supervisor/Manager-only
+Verification Test
+Authenticate as Worker → POST /risk-assessments; assert expected policy
+F-005 — Hazard Register
+Finding ID
+F-005
+Module
+Hazard Register
+Requirement
+Verify controls: Manager (doc §13); Close: Manager only
+Expected Behaviour
+Verify effectiveness restricted to Manager; close Manager-only
+Actual Behaviour
+close_hazard correctly uses MANAGER_ROLES; verify_controls uses ALL_ELEVATED_ROLES
+Status
+PARTIALLY_IMPLEMENTED
+Severity
+Medium
+Evidence
+require_role ALL_ELEVATED on verify-controls vs MANAGER on close
+File
+backend/app/controllers/hazard_register.py
+Function
+verify_controls / close_hazard
+Line
+886-908, 954-972
+Business Impact
+Supervisors can mark controls effective without Manager verification gate
+Recommended Fix
+Change verify_controls to MANAGER_ROLES to match documentation
+Verification Test
+Supervisor POST verify-controls → 403; Manager → 200
+F-006 — Equipment & Assets
+Finding ID
+F-006
+Module
+Equipment & Assets
+Requirement
+Create/Update/Delete require equipment-write access
+Expected Behaviour
+Role/permission gate beyond mere authentication
+Actual Behaviour
+Endpoints only Depends(get_current_user); any authenticated org user can mutate
+Status
+PARTIALLY_IMPLEMENTED
+Severity
+Medium
+Evidence
+No require_role / permission check on create/update/delete
+File
+backend/app/controllers/equipment_register.py
+Function
+create_equipment / update_equipment / delete_equipment
+Line
+202-241
+Business Impact
+Workers can alter asset master / delete SCE records if they have a login token
+Recommended Fix
+Add require_role for write roles documented for equipment
+Verification Test
+Worker DELETE /equipment-register/{id} → 403
+F-007 — Workflow Engine / Report Factory
+Finding ID
+F-007
+Module
+Workflow Engine / Report Factory
+Requirement
+Invalid transition handling on all stage changes
+Expected Behaviour
+Every transition validates previous status
+Actual Behaviour
+start-investigation, verify-effectiveness, close validate; acknowledge and escalate do not validate prior status
+Status
+PARTIALLY_IMPLEMENTED
+Severity
+High
+Evidence
+acknowledge/escalate assign status unconditionally
+File
+backend/app/controllers/report_workflow_factory.py
+Function
+supervisor_acknowledge / supervisor_escalate
+Line
+533-547, 696-705
+Business Impact
+State machine can be corrupted by out-of-order API calls
+Recommended Fix
+Centralize ALLOWED_FROM map per action; reject illegal transitions
+Verification Test
+Matrix of from→to for each endpoint; illegal pairs return 400
+F-008 — Excel / Org Setup
+Finding ID
+F-008
+Module
+Excel / Org Setup
+Requirement
+Doc known issue: GET /org-setup/step1/template returns empty JSON stub
+Expected Behaviour
+Per PDF: empty JSON (documented defect)
+Actual Behaviour
+Returns CSV with header + example row (implementation fixed; documentation stale)
+Status
+NOT_IMPLEMENTED
+Severity
+Low
+Evidence
+Response builds CSV content-disposition attachment
+File
+backend/app/controllers/stubs.py
+Function
+org_setup_step1_template
+Line
+348-361
+Business Impact
+Documentation inaccurate; auditors following PDF will expect a stub that no longer exists
+Recommended Fix
+Update EHSERA_Core_Modules_Documentation.pdf Section 14 known rough edge
+Verification Test
+GET step1/template → Content-Type text/csv and non-empty body
+F-009 — Audit Trail
+Finding ID
+F-009
+Module
+Audit Trail
+Requirement
+Dedicated audit_logs trail for modules
+Expected Behaviour
+Persistent audit log writes for transitions
+Actual Behaviour
+audit_trail.py derives read-only trail from timestamps; comments state audit_logs table is empty / unused
+Status
+PARTIALLY_IMPLEMENTED
+Severity
+Medium
+Evidence
+Derived trail union; no write path to audit_logs confirmed in controller comments
+File
+backend/app/controllers/audit_trail.py
+Function
+module docstring / trail builders
+Line
+1-10
+Business Impact
+No immutable append-only log; reconstructed trails miss intermediate failed attempts
+Recommended Fix
+Write transition events to audit_logs or event bus with actor/timestamp/from/to
+Verification Test
+Perform acknowledge; assert durable trail row with previous+next status
+F-010 — Excel Export
+Finding ID
+F-010
+Module
+Excel Export
+Requirement
+No export of existing records to Excel
+Expected Behaviour
+Export disabled
+Actual Behaviour
+Analytics Export button permanently disabled with tooltip
+Status
+IMPLEMENTED
+Severity
+Info
+Evidence
+title='Export is not available yet'
+File
+FrontendNew/src/app/pages/AnalyticsPage.tsx
+Function
+Export control
+Line
+88
+Business Impact
+Matches documentation; no data export capability for customers
+Recommended Fix
+If export required later, implement org-scoped export with RBAC
+Verification Test
+UI Export control disabled; no backend export route for live datasets
+F-011 — Dashboard KPI
+Finding ID
+F-011
+Module
+Dashboard KPI
+Requirement
+DART Rate definition: Days Away Restricted or Transferred portion
+Expected Behaviour
+Typically based on days away/restricted/transfer cases
+Actual Behaviour
+Uses lost_time_incidents × 200000 / hours (same LTI count as LTIF numerator scaled differently); separate ltisr uses days_away
+Status
+PARTIALLY_IMPLEMENTED
+Severity
+Medium
+Evidence
+dart_rate from LTI count; ltisr from sum(days_away)
+File
+backend/app/controllers/dashboard.py
+Function
+get_leading_indicators
+Line
+282-308
+Business Impact
+DART may not match industry DART definition; UI may mislead auditors
+Recommended Fix
+Confirm with client whether DART should use days_away/restricted flags; align formula + tooltip
+Verification Test
+Incident with days_away>0 but severity≠Lost Time; verify expected DART behaviour
+F-012 — Permits
+Finding ID
+F-012
+Module
+Permits
+Requirement
+Approve/Reject/Activate/Suspend/Complete/Verify/Close with role + state gates
+Expected Behaviour
+State machine with validity window and role checks
+Actual Behaviour
+permit_workflow implements _require_state, _require_within_validity, holder/elevated checks; verify advances to verified only if valid
+Status
+IMPLEMENTED
+Severity
+Info
+Evidence
+State guards present on approve/activate/close/verify
+File
+backend/app/controllers/permit_workflow.py
+Function
+manager_approve / activate_permit / auditor_verify / supervisor_close
+Line
+485-815
+Business Impact
+Stronger than report-factory acknowledge path
+Recommended Fix
+Use as pattern for report_workflow_factory transitions
+Verification Test
+Activate outside validity → 400; close from active → 400; close from work_complete → 200
+11. Module-wise Summary
+Module
+IMPL
+PARTIAL
+NOT
+INCORRECT
+UNABLE
+Total
+Architecture
+1
+0
+0
+0
+0
+1
+Audit
+1
+0
+0
+0
+0
+1
+Audit KPI
+1
+0
+0
+0
+0
+1
+CAPA
+1
+0
+0
+0
+0
+1
+CAPA KPI
+1
+0
+0
+0
+0
+1
+Compliance
+5
+0
+0
+0
+0
+5
+Dashboard
+1
+0
+0
+0
+0
+1
+Dashboard KPI
+4
+4
+0
+0
+0
+8
+Equipment
+1
+1
+0
+0
+0
+2
+Equipment Cert
+1
+0
+0
+0
+0
+1
+Excel
+3
+0
+1
+0
+0
+4
+Hazard Register
+0
+1
+0
+0
+0
+1
+Incident
+0
+1
+0
+0
+0
+1
+Near Miss
+0
+1
+0
+0
+0
+1
+Permits
+1
+0
+0
+0
+0
+1
+Permits KPI
+1
+0
+0
+0
+0
+1
+Risk A
+1
+0
+0
+1
+0
+2
+Risk B
+1
+0
+0
+0
+0
+1
+Risk KPI
+0
+0
+0
+1
+0
+1
+Vendors
+2
+0
+0
+0
+0
+2
+Workflow Engine
+1
+0
+0
+0
+0
+1
+12. Recommended Remediation
+Priority order (based on severity × exploitability):
+1. P0 — Add previous-status guards to report_workflow_factory acknowledge/escalate (and any other unguarded transitions). Mirror permit_workflow._require_state.
+2. P0 — Fix leading-indicator man_hours to respect the selected date window (or document all-time denominator explicitly in UI tooltips).
+3. P0 — Replace Risk overdue CAPA status=='Overdue' with due-date/lifecycle is_overdue computation used by /capa/ageing.
+4. P1 — Align Hazard verify-controls authorization with Manager-only requirement.
+5. P1 — Add equipment write role checks; clarify Risk Assessment who-can-start in code or documentation.
+6. P1 — Introduce durable transition audit logging (from_status, to_status, actor, timestamp).
+7. P2 — Refresh PDF Section 14 Step1 template 'known rough edge' (now returns CSV).
+8. P2 — Confirm DART definition with client (LTI count vs days_away/restricted).
+Appendix A — Totals by Status
+Status
+Requirement count
+IMPLEMENTED
+27
+INCORRECT_IMPLEMENTATION
+2
+NOT_IMPLEMENTED
+1
+PARTIALLY_IMPLEMENTED
+8
+Appendix B — Audit Method Notes
+Source of truth: EHSERA_Core_Modules_Documentation.pdf extracted text. Code inspected under backend/app/controllers, services, FrontendNew/src. Runtime behaviour / DB contents / production config were not executed end-to-end in this pass; where behaviour depends on live data only, items remain UNABLE_TO_VERIFY rather than assumed.
+This report did not modify application source code. Generator script: generate_ehsera_core_modules_audit_docx.py
+End of Audit Report

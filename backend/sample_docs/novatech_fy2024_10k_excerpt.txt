@@ -1,0 +1,46 @@
+NOVATECH INDUSTRIES INC.
+FORM 10-K — FISCAL YEAR 2024 (TEST FILING EXCERPT)
+CIK: 0001987451 | Ticker: NVTC | Fiscal year ended December 31, 2024
+(Synthetic document for RAG testing — not a real SEC filing)
+
+ITEM 1 — BUSINESS
+
+NovaTech Industries Inc. ("NovaTech" or "the Company") designs and sells industrial automation controllers, edge AI inference modules, and predictive-maintenance software to manufacturers in North America, Europe, and Southeast Asia. The Company was incorporated in Delaware in 2011 and is headquartered in Austin, Texas. As of December 31, 2024, NovaTech employed 4,820 full-time employees.
+
+Principal product lines:
+  - ControLogic Series (industrial PLCs and I/O)
+  - EdgeMind Modules (on-prem AI inference appliances)
+  - PulseCare Software (SaaS predictive maintenance)
+
+ITEM 7 — MANAGEMENT'S DISCUSSION AND ANALYSIS
+
+FINANCIAL HIGHLIGHTS — FISCAL 2024
+
+Total net revenue for fiscal 2024 was $2.847 billion, an increase of 18.4% from $2.404 billion in fiscal 2023. Net income was $312.6 million, or $2.41 per diluted share, compared with $241.0 million, or $1.88 per diluted share, in fiscal 2023.
+
+Revenue by segment (fiscal 2024):
+  - ControLogic hardware: $1.412 billion (49.6%)
+  - EdgeMind modules: $698 million (24.5%)
+  - PulseCare SaaS and services: $737 million (25.9%)
+
+Gross margin expanded to 47.2% in fiscal 2024 from 44.8% in fiscal 2023, primarily due to a higher mix of PulseCare recurring revenue and improved EdgeMind component costs after renegotiating silicon supply contracts in March 2024.
+
+Operating expenses totaled $891 million, including $214 million of research and development. Capital expenditures were $96.4 million. Free cash flow was $401 million.
+
+Cash and cash equivalents at year-end were $628 million. Long-term debt outstanding was $450 million under the Company's 2031 senior notes (coupon 4.125%).
+
+GEOGRAPHIC MIX
+
+United States contributed $1.61 billion of revenue. Europe contributed $712 million. Asia-Pacific contributed $525 million.
+
+ITEM 1A — RISK FACTORS (SELECTED)
+
+Supply concentration: Approximately 62% of ControLogic printed circuit assemblies are manufactured by two contract manufacturers in Penang, Malaysia. A prolonged outage could reduce ControLogic shipments by more than 40% within one quarter.
+
+Customer concentration: The Company's ten largest customers accounted for 34% of fiscal 2024 revenue. The single largest customer, Apex Motors Assembly LLC, accounted for 9.1% of revenue.
+
+Cybersecurity: PulseCare processes plant telemetry. A material breach of customer operational data could trigger contractual liabilities estimated by management at up to $85 million under current master service agreements.
+
+FORWARD-LOOKING COMMENTARY
+
+Management expects fiscal 2025 revenue in the range of $3.10 billion to $3.25 billion, assuming PulseCare net retention remains above 112% and EdgeMind unit ASP declines no more than 6% year over year.
