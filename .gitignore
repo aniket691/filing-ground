@@ -16,3 +16,7 @@ _stitch_preview/
 backend/finance_rag.db
 backend/*.db
 backend/storage_data/
+
+# .NET build output
+backend-dotnet/**/bin/
+backend-dotnet/**/obj/

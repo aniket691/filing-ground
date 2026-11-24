@@ -1,0 +1,6 @@
+{
+  "FinQuery.Api, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null": "D:\\Aniket\\My WorkSpace\\Personal\\Career\\Private\\Projects\\Dot Net Migration\\filing-ground-main\\backend-dotnet\\src\\FinQuery.Api",
+  "FinQuery.Application, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null": "D:\\Aniket\\My WorkSpace\\Personal\\Career\\Private\\Projects\\Dot Net Migration\\filing-ground-main\\backend-dotnet\\src\\FinQuery.Application",
+  "FinQuery.Domain, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null": "D:\\Aniket\\My WorkSpace\\Personal\\Career\\Private\\Projects\\Dot Net Migration\\filing-ground-main\\backend-dotnet\\src\\FinQuery.Domain",
+  "FinQuery.Infrastructure, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null": "D:\\Aniket\\My WorkSpace\\Personal\\Career\\Private\\Projects\\Dot Net Migration\\filing-ground-main\\backend-dotnet\\src\\FinQuery.Infrastructure"
+}

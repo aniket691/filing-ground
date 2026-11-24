@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/FinQuery.Api/FinQuery.Api.csproj" />
+    <Project Path="src/FinQuery.Application/FinQuery.Application.csproj" />
+    <Project Path="src/FinQuery.Domain/FinQuery.Domain.csproj" />
+    <Project Path="src/FinQuery.Infrastructure/FinQuery.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/FinQuery.Api.Tests/FinQuery.Api.Tests.csproj" />
+    <Project Path="tests/FinQuery.Application.Tests/FinQuery.Application.Tests.csproj" />
+  </Folder>
+</Solution>
