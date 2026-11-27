@@ -196,8 +196,3 @@ Full notes: **[DEPLOY.md](./DEPLOY.md)**.
 
 ---
 
-## License & contact
-
-Private / portfolio project unless otherwise stated.
-
-**Repo:** [github.com/aniketdalalml-creator/finquery-rag](https://github.com/aniketdalalml-creator/finquery-rag)
